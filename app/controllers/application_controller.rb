@@ -6,7 +6,6 @@ class ApplicationController < ActionController::Base
   helper_method :current_user
   helper_method :logged_in?
   helper_method :admin_only!
-  helper_method :menu_item
   helper_method :require_user
   helper_method :set_params_page
   helper_method :show_layout?
@@ -41,20 +40,6 @@ class ApplicationController < ActionController::Base
   # a particular page, and redirects them if they're not.
   def require_login!(opts = {:return => "/"})
     redirect_with_sorry(opts) unless logged_in?
-  end
-
-  def menu_item(name, url, options = {})
-    icon = options.fetch(:icon){ false }
-    classes = options.fetch(:classes){ [] }
-
-    classes << name.downcase.gsub(" ", "_")
-    classes << (request.path_info == url ? "active" : "")
-
-    "<li class='#{classes.join(" ")}'>
-      <a href='#{url}'>" +
-      (icon ? "<div class='icon'></div>" : "") +
-      "#{name}</a>
-    </li>"
   end
 
   def require_user
@@ -99,6 +84,15 @@ class ApplicationController < ActionController::Base
 
   def show_layout?
     !pjax_request?
+  end
+
+  def sign_in(user)
+    session[:user_id] = user.id
+  end
+
+  def sign_out
+    session[:user_id] = nil
+    @current_user = nil
   end
 
 private

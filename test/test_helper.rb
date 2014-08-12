@@ -1,6 +1,8 @@
 require "minitest/autorun"
 require "webmock/test_unit"
 
+require "mocha/setup"
+
 ENV["RAILS_ENV"] = "test"
 begin
   require File.expand_path('../../config/environment', __FILE__)
@@ -27,6 +29,12 @@ rescue Mongo::ConnectionFailure => e
   exit 1
 end
 
+VCR.config do |c|
+  c.cassette_library_dir = 'test/data/vcr_cassettes'
+  c.stub_with :webmock
+  c.ignore_localhost = true
+end
+
 Fabrication.configure do |config|
   fabricator_dir = "test/fabricators"
 end
@@ -48,7 +56,7 @@ module TestHelper
     {
       "provider" => options[:provider] || "twitter",
       "uid" => options[:uid] || 12345,
-      "user_info" => {
+      "info" => {
         "name" => "Joe Public",
         "email" => "joe@public.com",
         "nickname" => options[:nickname] || username,

@@ -19,7 +19,6 @@ describe "following" do
 
   describe "on rstat.us" do
     it "follows another user" do
-      skip "This is failing on Travis but not locally and we don't know why"
       log_in_as_some_user
 
       u2 = Fabricate(:user)
@@ -31,18 +30,25 @@ describe "following" do
     end
 
     it "unfollows another user" do
-      log_in_as_some_user
+      heisenbug_log do
+        log_in_as_some_user
 
-      u2 = Fabricate(:user)
-      a2 = Fabricate(:authorization, :user => u2)
+        u2 = Fabricate(:user)
+        a2 = Fabricate(:authorization, :user => u2)
 
-      @u.follow! u2.feed
+        @u.follow! u2.feed
 
-      visit "/users/#{@u.username}/following"
-      click_button "unfollow-#{u2.feed.id}"
+        visit "/users/#{@u.username}/following"
 
-      within flash do
-        assert has_content? "No longer following #{u2.username}"
+        if has_button? "unfollow-#{u2.feed.id}"
+          click_button "unfollow-#{u2.feed.id}"
+        else
+          raise Heisenbug
+        end
+
+        within flash do
+          assert has_content? "No longer following #{u2.username}"
+        end
       end
     end
   end
@@ -60,6 +66,22 @@ describe "following" do
       visit "/users/#{@u.username}/following"
       assert_match /leopard.*zebra/m, page.body
     end
+
+    it "responds with HTML by default if Accept header is */*" do
+      log_in_as_some_user
+
+      u2 = Fabricate(:user, :username => "user1")
+      @u.follow! u2.feed
+
+      header "Accept", "*/*"
+      get "/users/#{@u.username}/following"
+
+      html = Nokogiri::HTML::Document.parse(last_response.body)
+      users = html.css("li.user")
+
+      users.first.text.must_match("user1")
+    end
+
 
     it "outputs json" do
       log_in_as_some_user

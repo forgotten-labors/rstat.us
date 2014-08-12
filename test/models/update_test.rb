@@ -1,7 +1,41 @@
+# encoding: utf-8
 require_relative '../test_helper'
 
 describe Update do
   include TestHelper
+
+  describe "search" do
+    describe "blank query" do
+      before do
+        20.times { |count| Fabricate(:update, :text => "This is update #{count}") }
+      end
+
+      it "returns all updates when the query is blank" do
+        assert_equal 20, Update.search("", {:from => 0, :size => 20}).count
+      end
+
+      it "can paginate through all updates" do
+        page_1_updates = Update.search("", {:from => 0, :size => 3})
+        page_2_updates = Update.search("", {:from => 3, :size => 3})
+
+        page_1_updates.wont_equal page_2_updates
+      end
+    end
+
+    it "returns an update that matches the given query" do
+      10.times { |count| Fabricate(:update, :text => "This is update #{count}") }
+      Fabricate(:update, :text => "Something different to look for")
+      10.times { |count| Fabricate(:update, :text => "This is update #{count+10}") }
+      assert_equal 1, Update.basic_search("something different", {:from => 0, :size => 20}).count
+    end
+
+    it "returns updates that match the given query" do
+      5.times { |count| Fabricate(:update, :text => "This is update #{count}") }
+      3.times { |count| Fabricate(:update, :text => "Something else to look for") }
+      15.times { |count| Fabricate(:update, :text => "This is update #{count}") }
+      assert_equal 3, Update.basic_search("look for", {:from => 0, :size => 20}).count
+    end
+  end
 
   describe "text length" do
     it "is not valid without any text" do
@@ -65,6 +99,19 @@ describe Update do
         u = Fabricate(:update, :text => "This is a message mentioning @SteveKlabnik@identi.ca.")
         assert_match /<a href='#{@author.url}'>@SteveKlabnik@identi.ca<\/a>/, u.to_html
       end
+
+      describe "mentioning a different user" do
+        it "makes a link (before create)" do
+          @mentioned = Fabricate(:author, :username => "chrismdp",
+                              :domain => "rstat.us")
+          @author = Fabricate(:author, :username => "steveklabnik",
+                              :domain => "identi.ca",
+                              :remote_url => 'http://identi.ca/steveklabnik')
+          u = Fabricate.build(:update, :text => "This is a message mentioning @chrismdp@rstat.us.", :author => @author)
+          assert_match %r{<a href='http://rstat.us/users/chrismdp'>@chrismdp@rstat.us<\/a>}, u.to_html
+        end
+
+      end
     end
 
     describe "existing user mentioned in the middle of the word" do
@@ -113,14 +160,14 @@ describe Update do
   describe "hashtags" do
     it "makes links if hash starts a word (before create)" do
       u = Fabricate.build(:update, :text => "This is a message with a #hashtag.")
-      assert_match /<a href='\/search\?q=%23hashtag'>#hashtag<\/a>/, u.to_html
+      assert_match /<a href='\/search\?search=%23hashtag'>#hashtag<\/a>/, u.to_html
       u = Fabricate.build(:update, :text => "This is a message with a#hashtag.")
       assert_equal "This is a message with a#hashtag.", u.to_html
     end
 
     it "makes links if hash starts a word (after create)" do
       u = Fabricate(:update, :text => "This is a message with a #hashtag.")
-      assert_match /<a href='\/search\?q=%23hashtag'>#hashtag<\/a>/, u.to_html
+      assert_match /<a href='\/search\?search=%23hashtag'>#hashtag<\/a>/, u.to_html
       u = Fabricate(:update, :text => "This is a message with a#hashtag.")
       assert_equal "This is a message with a#hashtag.", u.to_html
     end
@@ -128,13 +175,27 @@ describe Update do
     it "makes links for both a hashtag and a URL (after create)" do
       u = Fabricate(:update, :text => "This is a message with a #hashtag and mentions http://rstat.us/.")
 
-      assert_match /<a href='\/search\?q=%23hashtag'>#hashtag<\/a>/, u.to_html
+      assert_match /<a href='\/search\?search=%23hashtag'>#hashtag<\/a>/, u.to_html
       assert_match /<a href='http:\/\/rstat.us\/'>http:\/\/rstat.us\/<\/a>/, u.to_html
     end
 
     it "extracts hashtags" do
       u = Fabricate(:update, :text => "#lots #of #hash #tags")
       assert_equal ["lots", "of", "hash", "tags"], u.tags
+    end
+
+    it "extracts hashtags when international symbols exist in hashtag" do
+      u = Fabricate(:update, :text => "#Cantábrico is an international hashtag")
+      assert_equal ["Cantábrico"], u.tags
+    end
+
+    it "makes links for international hashtag and a URL (after create)" do
+      hashtag = "#Cantábrico"
+      u = Fabricate(:update, :text => "This is a message with a #{hashtag}.")
+      proper_link = "<a href='/search\?search=%23#{hashtag.gsub(/^#/, '')}'>#{hashtag}</a>"
+      # Hacky method because MiniTest assert_match method insisted on escaping utf-8 characters within the regex
+      assert( u.to_html.include?(proper_link),
+            "#{u.to_html} does not match #{proper_link}")
     end
   end
 

@@ -27,7 +27,7 @@ class SubscriptionsController < ApplicationController
   # A DELETE call will unsubscribe you from that particular feed. We make
   # sure that you're logged in first, because otherwise, it's nonsensical.
   def destroy
-    require_login! :return => request.referrer
+    require_login! :return => request.referrer and return
 
     @author = @feed.author
 
@@ -58,46 +58,41 @@ class SubscriptionsController < ApplicationController
   # A POST is how you subscribe to someone's feed. We want to make sure
   # that you're logged in for this one, too.
   def create
-    require_login! :return => request.referrer
+    require_login! :return => request.referrer and return
 
-    # Find or create the Feed
-    begin
-      subscribe_to_feed = Feed.find_or_create(params[:subscribe_to])
-    rescue Errno::ENOENT => e
-      # This means the user's entry was neither a webfinger identifier
-      # nor a feed URL, and calling `open` on it did not return anything.
-      flash[:notice] = "There was a problem following #{params[:subscribe_to]}. Please specify the whole ID for the person you would like to follow, including both their username and the domain of the site they're on. It should look like an email address-- for example, username@status.net"
+    target = FeedService.new(params[:subscribe_to], root_url).find_or_create!
+
+    if current_user.following_feed? target
+      # Stop and return a nice message if already following this feed
+      flash[:notice] = "You're already following #{target.author.username}."
       redirect_to request.referrer
       return
+    else
+      # Actually follow!
+      target_feed = current_user.follow! target
+
+      if target_feed
+        # Attempt to inform the hub for remote feeds
+        if target_feed.remote? && target_feed.hubs.any?
+          hub_url = target_feed.hubs.first
+
+          sub = OSub::Subscription.new(subscription_url(target_feed.id, :format => "atom"), target_feed.url, target_feed.secret)
+          sub.subscribe(hub_url, true, target_feed.verify_token)
+        end
+
+        flash[:notice] = "Now following #{target_feed.author.username}."
+        redirect_to request.referrer
+      else
+        raise RstatUs::InvalidSubscribeTo
+      end
     end
 
-
-    # Stop and return a nice message if already following this feed
-    if current_user.following_feed? subscribe_to_feed
-      flash[:notice] = "You're already following #{subscribe_to_feed.author.username}."
-      redirect_to request.referrer
-      return
-    end
-
-    # Actually follow!
-    f = current_user.follow! subscribe_to_feed
-
-    unless f
-      flash[:notice] = "There was a problem following #{params[:subscribe_to]}."
-      redirect_to request.referrer
-      return
-    end
-
-    # Attempt to inform the hub for remote feeds
-    unless f.local? || f.hubs.empty?
-      hub_url = f.hubs.first
-
-      sub = OSub::Subscription.new(subscription_url(f.id, :format => "atom"), f.url, f.secret)
-      sub.subscribe(hub_url, true, f.verify_token)
-    end
-
-    flash[:notice] = "Now following #{f.author.username}."
+  rescue RstatUs::InvalidSubscribeTo => e
+    # This means the user's entry was neither a webfinger identifier
+    # nor a feed URL, and calling `open` on it did not return anything.
+    flash[:error] = "There was a problem following #{params[:subscribe_to]}. Please specify the whole ID for the person you would like to follow, including both their username and the domain of the site they're on. It should look like an email address-- for example, username@status.net"
     redirect_to request.referrer
+    return
   end
 
   private

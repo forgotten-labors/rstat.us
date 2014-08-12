@@ -4,4 +4,21 @@
 # If you change this key, all old signed cookies will become invalid!
 # Make sure the secret is at least 30 characters and all random,
 # no regular words or you'll be exposed to dictionary attacks.
-RstatUs::Application.config.secret_token = 'f9325a55f7a4306eee2f4faa38c8ec1650af793c71ef956d0ba02373f24ac08bd80a4c4f24e5520450e83101ea97c4d732256354fd8c2e34a38067575d800868'
+
+
+if ENV["SECRET_TOKEN"].blank?
+  if Rails.env.production?
+    raise "You must set ENV[\"SECRET_TOKEN\"] in your app's config vars"
+  elsif Rails.env.test?
+    # Generate the key and test away
+    ENV["SECRET_TOKEN"] = RstatUs::Application.config.secret_token = SecureRandom.hex(30)
+  else
+    config_file = File.expand_path(File.join(Rails.root, '/config/config.yml'))
+    config = YAML.load_file(config_file)
+    # Generate the key, set it for the current environment, update the yaml file and move on
+    ENV["SECRET_TOKEN"] = config[Rails.env]['SECRET_TOKEN'] = SecureRandom.hex(30)
+    File.open(config_file, 'w') { |file| file.write(config.to_yaml) }
+  end
+end
+
+RstatUs::Application.config.secret_token = ENV["SECRET_TOKEN"]

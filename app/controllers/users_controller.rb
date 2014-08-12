@@ -1,24 +1,30 @@
 class UsersController < ApplicationController
   before_filter :find_user, :only => [:show, :edit, :update, :feed, :following, :followers]
+  before_filter :require_user, :only => [:edit, :update, :confirm_delete, :destroy]
 
   def index
     @title = "users"
     set_params_page
-    begin
-      @authors = Author.search(params)
-    rescue RegexpError
-      flash[:error] = "Please enter a valid search term"
-      redirect_to users_path and return
-    end
-    unless @authors.empty?
-      @authors = @authors.paginate(:page => params[:page], :per_page => params[:per_page])
-      set_pagination_buttons(@authors)
+    if params[:search].blank?
+      @authors = Author.paginate(:page => params[:page], :per_page => params[:per_page])
+    else
+      begin
+        @authors = Author.search(params)
+      rescue RegexpError
+        flash[:error] = "Please enter a valid search term"
+        redirect_to users_path and return
+      end
+
+      unless @authors.empty?
+        @authors = @authors.paginate(:page => params[:page], :per_page => params[:per_page])
+        set_pagination_buttons(@authors, :search => params[:search])
+      end
     end
   end
 
   def show
     if @user.nil?
-      render :file => "#{Rails.root}/public/404.html", :status => 404
+      render :file => "#{Rails.root}/public/404", :status => 404
     elsif @user.username != params[:id] # case difference
       @title = @user.username
       redirect_to user_path(@user)
@@ -32,6 +38,14 @@ class UsersController < ApplicationController
       set_pagination_buttons(@updates)
 
       headers['Link'] = "<#{user_xrd_path(@user.author)}>; rel=\"lrdd\"; type=\"application/xrd+xml\""
+
+      respond_to do |format|
+        format.html
+        format.json {
+          render :json => @updates.map{ |u| UpdateJsonDecorator.decorate(u) }
+        }
+      end
+
     end
   end
 
@@ -47,9 +61,9 @@ class UsersController < ApplicationController
 
   def update
     if @user == current_user
-      response = @user.edit_user_profile(params)
-      if response == true
+      @user.update_profile!(params)
 
+      unless @user.errors.any?
         unless @user.email.blank? || @user.email_confirmed
           Notifier.send_confirm_email_notification(@user.email, @user.create_token)
           flash[:notice] = "A link to confirm your updated email address has been sent to #{@user.email}."
@@ -57,10 +71,12 @@ class UsersController < ApplicationController
           flash[:notice] = "Profile saved!"
         end
 
-        redirect_to user_path(params[:id])
-
+        redirect_to user_path(@user)
       else
-        flash[:notice] = "Profile could not be saved: #{response}"
+        error_message = render_to_string :partial => 'users/errors',
+                                         :locals => {:user => @user}
+        flash[:error] = error_message.html_safe
+
         render :edit
       end
     else
@@ -85,11 +101,17 @@ class UsersController < ApplicationController
       Authorization.create_from_session!(session, @user)
 
       flash[:notice] = "Thanks! You're all signed up with #{@user.username} for your username."
-      session[:user_id] = @user.id
+      sign_in(@user)
       redirect_to root_path
     else
       render :new
     end
+  end
+
+  def autocomplete
+    @json = current_user.autocomplete(params[:term])
+
+    render :json => @json
   end
 
   # This is pretty much the same thing as /feeds/your_feed_id.atom, but we
@@ -98,7 +120,7 @@ class UsersController < ApplicationController
     if @user
       redirect_to feed_path(@user.feed, :format => :atom)
     else
-      render :file => "#{Rails.root}/public/404.html", :status => 404
+      render :file => "#{Rails.root}/public/404", :status => 404
     end
   end
 
@@ -106,7 +128,7 @@ class UsersController < ApplicationController
   # world, so pick wisely!
   def following
     if @user.nil?
-      render :file => "#{Rails.root}/public/404.html", :status => 404
+      render :file => "#{Rails.root}/public/404", :status => 404
     # If the username's case entered in the URL is different than the case
     # specified by that user, redirect to the case that the user prefers
     elsif @user.username != params[:id]
@@ -129,7 +151,7 @@ class UsersController < ApplicationController
       end
 
       respond_to do |format|
-        format.html { render "users/list", :locals => {:title => title} }
+        format.html { render "users/list", :locals => {:title => title, :list_class => "friends"} }
         format.json { render :json => @authors }
       end
     end
@@ -139,7 +161,7 @@ class UsersController < ApplicationController
   # followers. Only one way to find out...
   def followers
     if @user.nil?
-      render :file => "#{Rails.root}/public/404.html", :status => 404
+      render :file => "#{Rails.root}/public/404", :status => 404
     # If the username's case entered in the URL is different than the case
     # specified by that user, redirect to the case that the user prefers
     elsif @user.username != params[:id]
@@ -162,7 +184,7 @@ class UsersController < ApplicationController
         title = "@#{@user.username}'s followers"
       end
 
-      render "users/list", :locals => {:title => title}
+      render "users/list", :locals => {:title => title, :list_class => "followers"}
     end
   end
 
@@ -175,16 +197,16 @@ class UsersController < ApplicationController
   def confirm_email
     user = User.first(:perishable_token => params[:token])
     if user.nil?
-      flash[:notice] = "Can't find User Account for this link."
+      flash[:error] = "Can't find User Account for this link."
       redirect_to root_path
     elsif user.token_expired?
-      flash[:notice] = "Your link is no longer valid, please request a new one."
+      flash[:error] = "Your link is no longer valid, please request a new one."
       redirect_to root_path
     else
       user.email_confirmed = true
       user.reset_perishable_token
       # Register a session for the user
-      session[:user_id] = user.id
+      sign_in(user)
       flash[:notice] = "Email successfully confirmed."
       redirect_to root_path
     end
@@ -202,9 +224,15 @@ class UsersController < ApplicationController
   # with the url to reset their password. Users are then redirected to the
   # confirmation page to prevent repost issues
   def forgot_password_create
+    unless params[:email] =~ /^([\w\.%\+\-]+)@([\w\-]+\.)+([\w]{2,})$/i
+      flash[:error] = "You didn't enter a correct email address. Please check your email and try again."
+      return render "login/forgot_password"
+    end
+
     user = User.first(:email => params[:email])
+
     if user.nil?
-      flash[:notice] = "Your account could not be found, please check your email and try again."
+      flash[:error] = "Your account could not be found, please check your email and try again."
       render "login/forgot_password"
     else
       Notifier.send_forgot_password_notification(user.email, user.create_token)
@@ -232,49 +260,22 @@ class UsersController < ApplicationController
   # Submitted passwords are checked for length and confirmation. Once the
   # password has been reset the user is redirected to /
   def reset_password_create
-    user = nil
+    user = User.first(:perishable_token => params[:token]) if params[:token]
+    user = nil if user && user.token_expired?
 
-    if params[:token]
-      user = User.first(:perishable_token => params[:token])
-      if user and user.token_expired?
-        user = nil
-      end
-    end
+    redirect_to forgot_password_path unless user
+    password_service = PasswordService.new(user, params)
 
-    unless user.nil?
-      # XXX: yes, this is a code smell
-
-      if params[:password].size == 0
-        flash[:notice] = "Password must be present"
-        redirect_to reset_password_path(params[:token])
-        return
-      end
-
-      if params[:password] != params[:password_confirm]
-        flash[:notice] = "Passwords do not match"
-        redirect_to reset_password_path(params[:token])
-        return
-      end
-
-      # TODO: This may be unreachable, since we don't allow password reset
-      # without an email... look into this and remove this code if so.
-      if user.email.nil?
-        if params[:email].empty?
-          flash[:notice] = "Email must be provided"
-          redirect_to reset_password_path(params[:token])
-          return
-        else
-          user.email = params[:email]
-        end
-      end
-
-      user.password = params[:password]
-      user.save
-      flash[:notice] = "Password successfully set"
-      redirect_to root_path
+    if password_service.invalid?
+      flash[:error] = password_service.message
+      url = reset_password_path(params[:token])
     else
-      redirect_to forgot_password_path
+      password_service.reset_password
+      flash[:notice] = "Password successfully set"
+      url = root_path
     end
+
+    redirect_to url
   end
 
   # Public reset password page, accessible via a valid token. Tokens are only
@@ -283,12 +284,29 @@ class UsersController < ApplicationController
   def reset_password_with_token
     user = User.first(:perishable_token => params[:token])
     if user.nil? || user.token_expired?
-      flash[:notice] = "Your link is no longer valid, please request a new one."
+      flash[:error] = "Your link is no longer valid, please request a new one."
       redirect_to forgot_password_path
     else
       @token = params[:token]
       @user  = user
       render "login/password_reset"
+    end
+  end
+
+  def confirm_delete
+  end
+
+  def destroy
+    if current_user && params[:username_confirmation] == current_user.username
+      current_user.destroy
+      sign_out
+      flash[:notice] = "Your account has been deleted. We're sorry to see you go."
+      redirect_to root_path
+    elsif current_user
+      flash[:notice] = "Nothing was deleted since you did not type your username."
+      redirect_to edit_user_path
+    else
+      redirect_to root_path
     end
   end
 

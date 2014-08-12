@@ -1,5 +1,3 @@
-require_relative '../../lib/finds_or_creates_feeds'
-
 # Feeds are pretty central to everything. They're a representation of a PuSH
 # enabled Atom feed. Every user has a feed of their updates, we keep feeds
 # for remote users that our users are subscribed to, and maybe even other
@@ -14,48 +12,40 @@ class Feed
 
   include MongoMapper::Document
 
-  # Feed url (and an indicator that it is local if this is nil)
-  key :remote_url, String
+  key :remote_url,    String    # Feed url (and an indicator that it is local if
+                                # this is nil)
+  key :verify_token,  String    # OStatus subscriber information
+  key :secret,        String    # OStatus subscriber information
+  key :hubs,          Array     # For both pubs and subs, it needs to know what
+                                # hubs the feed is in
+                                # communication with in order to control pub/sub
+                                # operations
+  key :author_id,     ObjectId  # Association key
 
-  # OStatus subscriber information
-  key :verify_token, String
-  key :secret, String
-
-  # For both pubs and subs, it needs to know what hubs the feed is in
-  # communication with in order to control pub/sub operations
-  key :hubs, Array
-
-  belongs_to :author
-  key :author_id, ObjectId
-
-  many :updates, :order => 'created_at desc'
+  belongs_to  :author
+  many        :updates, :order => 'created_at desc', :dependent => :destroy
 
   timestamps!
 
   after_create :default_hubs
 
-  def self.find_or_create(subscribe_to)
-    FindsOrCreatesFeeds.find_or_create(subscribe_to)
-  end
-
-  def self.create_from_feed_data(feed_data)
-    feed = Feed.create(:remote_url => feed_data.url)
+  def self.create_and_populate!(feed_data)
+    feed = create(:remote_url => feed_data.url)
     feed.populate(feed_data.finger_data)
     feed
   end
 
-   # This is because sometimes the mongomapper association returns nil
+  # This is because sometimes the mongomapper association returns nil
   # even though there is an author_id and the Author exists; see Issue #421
   def author
     Author.find(author_id)
   end
 
   def populate(finger_data)
-    # TODO: More entropy would be nice
-    self.verify_token = Digest::MD5.hexdigest(rand.to_s)
-    self.secret = Digest::MD5.hexdigest(rand.to_s)
+    self.verify_token = SecureRandom.hex
+    self.secret       = SecureRandom.hex
 
-    ostatus_feed = OStatus::Feed.from_url(url)
+    ostatus_feed      = OStatus::Feed.from_url(url)
 
     avatar_url = ostatus_feed.icon
     if avatar_url == nil
@@ -64,19 +54,18 @@ class Feed
 
     a = ostatus_feed.author
 
-    self.author = Author.create(:name => a.portable_contacts.display_name,
-                                :username => a.name,
-                                :email => a.email,
+    self.author = Author.create(:name       => a.portable_contacts.display_name,
+                                :username   => a.name,
+                                :email      => a.email,
                                 :remote_url => a.uri,
-                                :domain => a.uri,
+                                :domain     => a.uri,
                                 :salmon_url => ostatus_feed.salmon,
-                                :bio => a.portable_contacts.note,
-                                :image_url => avatar_url)
+                                :bio        => a.portable_contacts.note,
+                                :image_url  => avatar_url)
 
-    if(finger_data)
+    if finger_data
       self.author.public_key = finger_data.public_key
       self.author.reset_key_lease
-
       self.author.salmon_url = finger_data.salmon_url
       self.author.save
     end
@@ -122,16 +111,29 @@ class Feed
   # Pings hub
   # needs absolute url for feed to give to hub for callback
   def ping_hubs
-    feed_url = "#{url}.atom"
+    feed_url = url(:format => :atom)
     OPub::Publisher.new(feed_url, hubs).ping_hubs
+  rescue SocketError => e
+    logger.error "Feed#ping_hubs error: could not reach hubs; check the network connection."
   end
 
   def local?
     remote_url.nil?
   end
 
-  def url(atom_format = false)
-    url = (remote_url.nil? && author) ? "http://#{author.domain}/feeds/#{id}" : remote_url
+  def remote?
+    !local?
+  end
+
+  def url(params = {})
+    atom_format = params.fetch(:format, false) == :atom
+
+    if local? && author
+      protocol = author.use_ssl ? "https" : "http"
+      url = "#{protocol}://#{author.domain}/feeds/#{id}"
+    else
+      url = remote_url
+    end
     url << ".atom" if atom_format
     url
   end

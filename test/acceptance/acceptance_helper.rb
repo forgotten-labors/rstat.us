@@ -2,11 +2,6 @@ require_relative '../test_helper'
 
 require 'rack/test'
 
-VCR.config do |c|
-  c.cassette_library_dir = 'test/data/vcr_cassettes'
-  c.stub_with :webmock
-end
-
 module AcceptanceHelper
   require 'capybara/dsl'
   require 'capybara/rails'
@@ -16,6 +11,13 @@ module AcceptanceHelper
   include ShowMeTheCookies
 
   OmniAuth.config.test_mode = true
+  ActionController::Base.allow_forgery_protection = true
+
+  if ENV["ENABLE_HTTPS"] == "yes"
+    Capybara.app_host = 'https://example.com'
+  else
+    Capybara.app_host = 'http://example.com'
+  end
 
   def app
     RstatUs::Application
@@ -30,6 +32,25 @@ module AcceptanceHelper
   def teardown
     DatabaseCleaner.clean
     Capybara.reset_sessions!
+    if ENV['ELASTICSEARCH_INDEX_URL']
+      delete_elasticsearch_index
+    end
+  end
+
+  def delete_elasticsearch_index
+    begin
+      RestClient.delete "#{ENV['ELASTICSEARCH_INDEX_URL']}/#{ELASTICSEARCH_INDEX_NAME}"
+    rescue RestClient::ResourceNotFound
+      # We don't care if we're deleting something that doesn't exist
+    end
+  end
+
+  if ENV['ELASTICSEARCH_INDEX_URL']
+    class ::Update
+      # This makes the document searchable immediately but affects
+      # performance in production.
+      after_save lambda { tire.index.refresh }
+    end
   end
 
   def omni_mock(username, options={})
@@ -101,4 +122,59 @@ module AcceptanceHelper
   def flash
     "#flash"
   end
+
+  def get_user_xrd user
+    subject = "acct:#{user.username}@#{user.author.domain}"
+    get "/users/#{subject}/xrd.xml"
+    if last_response.status == 301
+      follow_redirect!
+    end
+
+    Nokogiri.XML(last_response.body)
+  end
+
+  def logged_out?
+    within "#header" do
+      assert has_no_content?("Log Out")
+    end
+  end
+
+  def search_for(query)
+    visit "/search"
+    fill_in "search", :with => query
+    click_button "Search"
+  end
+
+  def heisenbug_log
+    old_rails_logger = Rails.logger
+    old_action_controller_logger = ActionController::Base.logger
+
+    logfile = 'log/heisenbug.log'
+    new_logger = Logger.new(logfile)
+    new_logger.level = Logger::DEBUG
+
+    Rails.logger = new_logger
+    ActionController::Base.logger = new_logger
+
+    begin
+      yield
+    rescue Heisenbug
+      puts
+      puts "Start of Heisenbug logging ======================================"
+      puts File.read logfile
+      puts "================"
+      puts body
+      puts "End of Heisenbug logging ========================================"
+      puts
+      puts "Congratulations!! You've seen an incidence of a HEISENBUG we're"
+      puts "tracking. Please copy the output from Start to End and paste it"
+      puts "in a comment on https://github.com/hotsh/rstat.us/issues/479"
+    ensure
+      File.delete logfile
+      Rails::logger = old_rails_logger
+      ActionController::Base.logger = old_action_controller_logger
+    end
+  end
 end
+
+class Heisenbug < StandardError; end

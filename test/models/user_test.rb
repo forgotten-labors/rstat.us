@@ -7,7 +7,7 @@ describe User do
   include TestHelper
 
   def stub_superfeedr_request_for_user(user)
-    user_feed_url = CGI.escape(user.feed.url(true))
+    user_feed_url = CGI.escape(user.feed.url(:format => :atom))
 
     # Downcase the escaped user_feed_url for ruby 1.9.2
     stub_request(:post, "http://rstatus.superfeedr.com/").
@@ -32,8 +32,8 @@ describe User do
       update = Fabricate(:update, :text => "@steve oh hai!")
       Fabricate(:update, :text => "just some other update")
 
-      assert_equal 1, u.at_replies({}).count
-      assert_equal update.id, u.at_replies({}).first.id
+      assert_equal 1, u.at_replies.count
+      assert_equal update.id, u.at_replies.first.id
     end
 
     it "returns all at_replies for a username containing ." do
@@ -41,12 +41,21 @@ describe User do
       u1 = Fabricate(:user, :username => "helloothere")
       update = Fabricate(:update, :text => "@hello.there how _you_ doin'?")
 
-      assert_equal 1, u.at_replies({}).count
-      assert_equal 0, u1.at_replies({}).count
+      assert_equal 1, u.at_replies.count
+      assert_equal 0, u1.at_replies.count
     end
   end
 
   describe "username" do
+    it "can be changed" do
+      u = Fabricate(:user)
+
+      stub_superfeedr_request_for_user u
+
+      u.update_profile!(:username => 'foobar')
+      assert_equal 'foobar', u.username
+    end
+
     it "must be unique" do
       Fabricate(:user, :username => "steve")
       u = Fabricate.build(:user, :username => "steve")
@@ -101,13 +110,12 @@ describe User do
   end
 
   describe "email" do
-    it "changes email" do
+    it "can be changed" do
       u = Fabricate(:user)
 
       stub_superfeedr_request_for_user u
 
-      u.edit_user_profile(:email => 'team@jackhq.com')
-      u.save
+      u.update_profile!(:email => 'team@jackhq.com')
       refute u.email_confirmed
     end
 
@@ -115,7 +123,9 @@ describe User do
       u = Fabricate(:user)
       assert_nil u.email_confirmed
     end
+  end
 
+  describe "perishable token" do
     it "sets the token" do
       u = Fabricate(:user)
       assert_nil u.perishable_token
@@ -134,16 +144,7 @@ describe User do
     end
   end
 
-  describe "reset password" do
-    it "sets the token" do
-      u = Fabricate(:user)
-      assert_nil u.perishable_token
-      assert_nil u.perishable_token_set
-      u.create_token
-      refute_nil u.perishable_token
-      refute_nil u.perishable_token_set
-    end
-
+  describe "#reset_password" do
     it "changes the password" do
       u = Fabricate(:user)
       u.password = "test_password"
@@ -155,12 +156,27 @@ describe User do
   end
 
   describe "email confirmation" do
+    it "has an unconfirmed email initially" do
+      u = Fabricate(:user)
+      assert_nil u.email_confirmed
+    end
+
+    it "changes email and requires reconfirmation" do
+      u = Fabricate(:user)
+
+      stub_superfeedr_request_for_user u
+
+      u.update_profile!(:email => 'team@jackhq.com')
+      u.save
+      refute u.email_confirmed
+    end
+
     it "allows unconfirmed emails to be entered more than once" do
       u = Fabricate(:user)
 
       stub_superfeedr_request_for_user u
 
-      u.edit_user_profile(:email => 'team@jackhq.com')
+      u.update_profile!(:email => 'team@jackhq.com')
 
       u2 = Fabricate(:user)
       u2.email = 'team@jackhq.com'
@@ -170,13 +186,13 @@ describe User do
     it "does not allow confirmed emails to be entered more than once" do
       u = Fabricate(:user)
       stub_superfeedr_request_for_user u
-      u.edit_user_profile(:email => 'team@jackhq.com')
+      u.update_profile!(:email => 'team@jackhq.com')
       u.email_confirmed = true
       u.save
 
       u2 = Fabricate(:user)
       stub_superfeedr_request_for_user u2
-      u2.edit_user_profile(:email => 'team@jackhq.com')
+      u2.update_profile!(:email => 'team@jackhq.com')
 
       refute u2.valid?
     end
@@ -244,16 +260,6 @@ describe User do
         end
       end
     end
-
-    describe "remote users" do
-    end
-  end
-
-  describe "#feed" do
-    it "has a local feed" do
-      u = Fabricate(:user)
-      assert u.feed.local?
-    end
   end
 
   describe "#timeline" do
@@ -289,6 +295,44 @@ describe User do
     end
   end
 
+  describe "#autocomplete" do
+    before do
+      @bob = Fabricate(:user, :username => "bob")
+      @rob = Fabricate(:user, :username => "rob")
+      @bob.follow!(@rob.feed)
+    end
+
+    it "returns a followed user starting with query" do
+      @result = @bob.autocomplete('r')
+      assert_equal @rob.username, @result.first[:label]
+    end
+
+    it "returns a followed user if we use a different case" do
+      @result = @bob.autocomplete('R')
+      assert_equal @rob.username, @result.first[:label]
+    end
+
+    it "returns an empty array if query is nil" do
+      @result = @bob.autocomplete(nil)
+      assert_equal [], @result
+    end
+
+    it "returns an empty array if query is blank" do
+      @result = @bob.autocomplete('')
+      assert_equal [], @result
+    end
+
+    it "returns an empty array if query is not matched" do
+      @result = @bob.autocomplete('ta')
+      assert_equal [], @result
+    end
+
+    it "escapes special characters" do
+      @result = @bob.autocomplete('r+(')
+      assert_equal [], @result
+    end
+  end
+
   describe "self#find_by_case_insensitive_username" do
     before do
       @u = Fabricate(:user, :username => "oMg")
@@ -308,6 +352,21 @@ describe User do
 
     it "escapes regex chars so that regexing isnt allowed" do
       assert_equal nil, User.find_by_case_insensitive_username(".mg")
+    end
+  end
+
+  describe "accounts that only have twitter auth, no password" do
+    it "should not error if you try to log in with a password" do
+      u = Fabricate(:user)
+
+      # This is contrived; users should no longer end up in this state.
+      u.update_attribute(:hashed_password, nil)
+
+      # Issue #532 is this throwing a BCrypt::Errors::InvalidHash exception;
+      # the correct behavior is returning nil.
+      authenticated_user = User.authenticate(u.username, "anything")
+
+      assert authenticated_user.nil?
     end
   end
 end

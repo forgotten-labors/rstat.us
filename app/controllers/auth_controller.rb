@@ -2,6 +2,7 @@
 # We're using OmniAuth to handle our Twitter connections, so these
 # routes are all derived from that codebase.
 class AuthController < ApplicationController
+  before_filter :require_user, :only => :destroy
 
   # Omniauth callback after a successful oauth session has been established.
   # New users and existing users adding linked accounts both use this callback
@@ -27,12 +28,12 @@ class AuthController < ApplicationController
         # might be a nice refactoring.
         session[:uid] = auth['uid']
         session[:provider] = auth['provider']
-        session[:name] = auth['user_info']['name']
-        session[:nickname] = auth['user_info']['nickname']
-        session[:website] = auth['user_info']['urls']['Website']
-        session[:description] = auth['user_info']['description']
-        session[:image] = auth['user_info']['image']
-        session[:email] = auth['user_info']['email']
+        session[:name] = auth['info']['name']
+        session[:nickname] = auth['info']['nickname']
+        session[:website] = auth['info']['urls']['Website']
+        session[:description] = auth['info']['description']
+        session[:image] = auth['info']['image']
+        session[:email] = auth['info']['email']
         session[:oauth_token] = auth['credentials']['token']
         session[:oauth_secret] = auth['credentials']['secret']
 
@@ -40,7 +41,7 @@ class AuthController < ApplicationController
         # the user is informed that they need to change it.
         # Everyone is redirected to /users/new to confirm that they'd like
         # to have their username.
-        if User.first :username => auth['user_info']['nickname']
+        if User.first :username => auth['info']['nickname']
           flash[:error] = "Sorry, someone else has that username. Please pick another."
         end
 
@@ -55,14 +56,19 @@ class AuthController < ApplicationController
 
     @auth.oauth_token = auth['credentials']['token']
     @auth.oauth_secret = auth['credentials']['secret']
-    @auth.nickname = auth['user_info']['nickname']
+    @auth.nickname = auth['info']['nickname']
     @auth.save
 
-    session[:user_id] = @auth.user.id
+    sign_in(@auth.user)
 
     flash[:notice] = "You're now logged in."
 
     redirect_to root_path
+  end
+
+  def invalid_auth_provider
+    flash[:error] = "We were unable to use your credentials because we do not support logging in with #{params[:provider]}."
+    redirect_to new_session_url
   end
 
   def failure
@@ -83,13 +89,11 @@ class AuthController < ApplicationController
 
   # This lets someone remove a particular Authorization from their account.
   def destroy
-    if user = User.first(:username => params[:username])
-      auth = Authorization.first(:provider => params[:provider], :user_id => user.id)
-      auth.destroy if auth
-      # Without re-setting the session[:user_id] we're logged out
-      session[:user_id] = user.id
-    end
+    auth = current_user.authorizations.where(:provider => params[:provider])
+    auth.map(&:destroy) unless auth.empty?
+    # Without re-setting the session[:user_id] we're logged out
+    sign_in(current_user)
 
-    redirect_to edit_user_path(user)
+    redirect_to edit_user_path(current_user)
   end
 end

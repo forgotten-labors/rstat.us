@@ -1,8 +1,40 @@
+# encoding: utf-8
 # An Update is a particular status message sent by one of our users.
 
 class Update
   require 'cgi'
   include MongoMapper::Document
+
+  if ENV['BONSAI_INDEX_URL'] || ENV['ELASTICSEARCH_INDEX_URL']
+    include Tire::Model::Search
+    include Tire::Model::Callbacks
+    index_name ELASTICSEARCH_INDEX_NAME
+
+    class << self
+      alias :elastic_search :search
+    end
+  end
+
+  def self.search(query, params = {})
+    params[:from] ||= 0
+    params[:size] ||= 20
+
+    if query.blank?
+      # Fallback to display all updates when query is blank
+      page = params[:from] / params[:size] + 1
+      per_page = params[:size]
+      self.paginate(
+        :page => page,
+        :per_page => per_page,
+        :order => :created_at.desc)
+    elsif ENV['BONSAI_INDEX_URL'] || ENV['ELASTICSEARCH_INDEX_URL']
+      # Tire adds a search method
+      self.elastic_search(query, params)
+    else
+      # Fallback if elasticsearch is not enabled
+      self.basic_search(query, params)
+    end
+  end
 
   # Determines what constitutes a username inside an update text
   USERNAME_REGULAR_EXPRESSION = /(^|[ \t\n\r\f"'\(\[{]+)@([^ \t\n\r\f&?=@%\/\#]*[^ \t\n\r\f&?=@%\/\#.!:;,"'\]}\)])(?:@([^ \t\n\r\f&?=@%\/\#]*[^ \t\n\r\f&?=@%\/\#.!:;,"'\]}\)]))?/
@@ -33,6 +65,7 @@ class Update
   # For speed, we generate the html for the update lazily when it is rendered
   key :html, String
 
+
   # We also generate the tags upon editing the update
   before_save :get_tags
 
@@ -44,6 +77,10 @@ class Update
   key :referral_id
   # Remote Update url: (nil if local)
   key :referral_url, String
+
+  def to_indexed_json
+    self.to_json
+  end
 
   def referral
     Update.first(:id => referral_id)
@@ -77,7 +114,7 @@ class Update
   end
 
   def get_tags
-    self[:tags] = self.text.scan(/#([\w\-\.]*)/).flatten
+    self[:tags] = self.text.scan(/#([[:alpha:]\-\.]*)/).flatten
   end
 
   # Return OStatus::Entry instance describing this Update
@@ -139,6 +176,24 @@ class Update
 
   protected
 
+  def self.basic_search(query, params)
+    leading_char = '\b'
+    if query[0] == '#'
+      leading_char = ''
+    end
+    # See explanation in searches_controller.rb about why we are
+    # switching back to page and per_page when not using
+    # ElasticSearch.
+    page = params[:from] / params[:size] + 1
+    per_page = params[:size]
+
+    self.where(:text => /#{leading_char}#{Regexp.quote(query)}\b/i).
+      paginate(
+        :page => page,
+        :per_page => per_page,
+        :order => :created_at.desc)
+  end
+
   def get_mentions
     self.mentions = []
 
@@ -197,7 +252,7 @@ class Update
       if $3 and a = Author.first(:username => /^#{$2}$/i, :domain => /^#{$3}$/i)
         author_url = a.url
         if author_url.start_with?("/")
-          author_url = "http://#{author.domain}#{author_url}"
+          author_url = "http://#{a.domain}#{author_url}"
         end
         "#{$1}<a href='#{author_url}'>@#{$2}@#{$3}</a>"
       elsif not $3 and a = Author.first(:username => /^#{$2}$/i)
@@ -211,8 +266,8 @@ class Update
       end
     end
 
-    out.gsub!(/(^|\s+)#(\w+)/) do |match|
-      "#{$1}<a href='/search?q=%23#{$2}'>##{$2}</a>"
+    out.gsub!( /(^|\s+)#(\p{Word}+)/ ) do |match|
+      "#{$1}<a href='/search?search=%23#{$2}'>##{$2}</a>"
     end
 
     self.html = out

@@ -1,18 +1,38 @@
 class UpdatesController < ApplicationController
   before_filter :process_params
-  before_filter :require_user, :only => [:timeline, :replies]
+  before_filter :require_user, :only => [:timeline, :replies, :export, :create, :destroy]
 
   def index
     @title = "updates"
-    render_index(Update)
+    @list_class = "all"
+
+    respond_to do |format|
+      format.html { render_index(Update) }
+      format.json {
+        @updates = Update
+        set_pagination
+        render :json => @updates.map{ |u| UpdateJsonDecorator.decorate(u) }
+      }
+    end
+
   end
 
   def timeline
-    render_index(current_user.timeline(params))
+    @list_class = "friends"
+    render_index(current_user.timeline)
   end
 
   def replies
-    render_index(current_user.at_replies(params))
+    @list_class = "mentions"
+    render_index(current_user.at_replies)
+  end
+
+  def export
+    updates = Update.where :author_id => current_user.author.id
+    json_updates = updates.to_json(:only => [:created_at, :text])
+    send_data(json_updates,
+              :filename => "#{current_user.username}-updates.json",
+              :type => "application/json")
   end
 
   def show
@@ -20,7 +40,7 @@ class UpdatesController < ApplicationController
     if @update
       render :layout => "update"
     else
-      render :file => "#{Rails.root}/public/404.html", :status => 404
+      render :file => "#{Rails.root}/public/404", :status => 404
     end
   end
 
@@ -36,7 +56,7 @@ class UpdatesController < ApplicationController
     current_user.feed.updates << u
 
     unless u.valid?
-      flash[:notice] = u.errors.values.join("\n")
+      flash[:error] = u.errors.values.join("\n")
     else
       current_user.feed.save
       current_user.save
@@ -46,7 +66,9 @@ class UpdatesController < ApplicationController
       flash[:notice] = "Update created."
     end
 
-    if request.referrer
+    reply_redirect = request.referrer.include?("reply=")
+
+    if request.referrer and !reply_redirect
       redirect_to request.referrer
     else
       redirect_to root_path
@@ -63,7 +85,7 @@ class UpdatesController < ApplicationController
       flash[:notice] = "Update Deleted!"
       redirect_to root_path
     else
-      flash[:notice] = "I'm afraid I can't let you do that, #{current_user.username}."
+      flash[:error] = "I'm afraid I can't let you do that, #{current_user.username}."
       redirect_to :back
     end
   end

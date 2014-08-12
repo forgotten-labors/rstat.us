@@ -51,13 +51,13 @@
           %p What people are talking about right now
         #content
           .updates
-            != render :partial => "updates/list", :locals => {:updates => Update.hot_updates}
+            != render :partial => "updates/list", :locals => {:updates => Update.hot_updates, :list_class => @list_class}
         #bottom
           .login
             %a{:href => "/login"}
               Join the conversation
           .read-more
-            %a{:href => "/updates"}
+            %a{:href => "/updates", :rel => "messages-all"}
               more...
       #sidebar
         #manifesto

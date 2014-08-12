@@ -27,6 +27,10 @@ module RstatUs
     # Custom directories with classes and modules you want to be autoloadable.
     config.autoload_paths += %W(lib)
 
+
+    # Force all access to the app over SSL, use Strict-Transport-Security, and use secure cookies.
+    config.force_ssl = (ENV["ENABLE_HTTPS"] == "yes")
+
     # Only load the plugins named here, in the order given (default is alphabetical).
     # :all can be used as a placeholder for all plugins not explicitly named.
     # config.plugins = [ :exception_notification, :ssl_requirement, :all ]
@@ -64,4 +68,10 @@ module RstatUs
     end
 
   end
+
+  DEFAULT_AVATAR = "avatar.png"
+
+  # Custom RstatUs exceptions
+  class InvalidSubscribeTo < StandardError; end
+  class InvalidSalmonMessage < StandardError; end
 end

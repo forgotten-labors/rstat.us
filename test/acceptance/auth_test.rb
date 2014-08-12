@@ -100,6 +100,28 @@ describe "Authorization" do
         assert_match /Add Twitter Account/, page.body
       end
 
+      it "cannot remove twitter from an account if you're not logged in" do
+        username = "someone_else"
+        u = Fabricate(:user, :username => username)
+        a = Fabricate(:authorization, :user => u)
+
+        delete "/users/#{username}/auth/#{a.provider}"
+
+        assert Authorization.find(a.id)
+      end
+
+      it "cannot remove twitter from an account that isn't yours" do
+        username = "someone_else"
+        u = Fabricate(:user, :username => username)
+        a = Fabricate(:authorization, :user => u)
+
+        log_in_as_some_user
+
+        delete "/users/#{username}/auth/#{a.provider}"
+
+        assert Authorization.find(a.id)
+      end
+
       # TODO: Add one for logging in with twitter
       it "signs up with twitter" do
         omni_mock("twitter_user", {
@@ -158,7 +180,11 @@ describe "Authorization" do
 
         visit '/auth/twitter'
 
-        assert page.has_content?("We were unable to use your credentials to log you in")
+        within flash do
+          assert has_content?(
+            "We were unable to use your credentials to log you in"
+          )
+        end
         assert_match /\/sessions\/new/, page.current_url
       end
 
@@ -167,7 +193,11 @@ describe "Authorization" do
 
         visit '/auth/twitter'
 
-        assert page.has_content?("We were unable to use your credentials because of a timeout")
+        within flash do
+          assert has_content?(
+            "We were unable to use your credentials because of a timeout"
+          )
+        end
         assert_match /\/sessions\/new/, page.current_url
       end
 
@@ -176,27 +206,87 @@ describe "Authorization" do
 
         visit '/auth/twitter'
 
-        assert page.has_content?("We were unable to use your credentials")
+        within flash do
+          assert has_content?("We were unable to use your credentials")
+        end
         assert_match /\/sessions\/new/, page.current_url
+      end
+    end
+
+    describe "facebook" do
+      it "fails facebook login with a nice error message; not crashing" do
+        visit '/auth/facebook/callback'
+
+        within flash do
+          assert has_content?("We were unable to use your credentials because we do not support logging in with facebook.")
+        end
+        page.current_url.must_match(/\/sessions\/new/)
+      end
+    end
+
+    describe "any provider other than twitter" do
+      it "fails with a nice error; we only support login with twitter" do
+        visit '/auth/whatever/callback'
+
+        within flash do
+          assert has_content?("We were unable to use your credentials because we do not support logging in with whatever.")
+        end
+        page.current_url.must_match(/\/sessions\/new/)
       end
     end
   end
 
   describe "profile" do
-    it "has an add twitter account button if no twitter auth" do
-      log_in_as_some_user(:with => :username)
-      visit "/users/#{@u.username}/edit"
+    describe "without twitter" do
+      before do
+        log_in_as_some_user(:with => :username)
+        visit "/users/#{@u.username}/edit"
+      end
 
-      assert_match page.body, /Add Twitter Account/
+      it "has an add twitter account button" do
+        assert has_button? "Add Twitter Account"
+      end
+
+      it "does not have the post to twitter preference" do
+        assert has_no_field? "Always post updates to Twitter?"
+      end
     end
 
-    it "shows twitter nickname if twitter auth" do
-      u = Fabricate(:user)
-      a = Fabricate(:authorization, :user => u, :nickname => "Awesomeo the Great")
-      log_in(u, a.uid, :nickname => a.nickname)
-      visit "/users/#{u.username}/edit"
+    describe "with twitter" do
+      before do
+        @u = Fabricate(:user)
+        a = Fabricate(:authorization, :user => @u, :nickname => "Awesomeo the Great")
+        log_in(@u, a.uid, :nickname => a.nickname)
+        visit "/users/#{@u.username}/edit"
+      end
 
-      assert_match page.body, /Awesomeo the Great/
+      it "shows the user's twitter nickname" do
+        within ".linked-accounts" do
+          text.must_include "Awesomeo the Great"
+        end
+      end
+
+      it "has a preference about whether to always post updates to twitter" do
+        assert has_checked_field? "Always post updates to Twitter?"
+      end
+
+      it "saves your updated preference to not always post to twitter" do
+        uncheck "Always post updates to Twitter?"
+        click_button "Save"
+        visit "/users/#{@u.username}/edit"
+
+        assert has_unchecked_field? "Always post updates to Twitter?"
+      end
+
+      it "saves your updated preference to always post to twitter after setting it to not" do
+        uncheck "Always post updates to Twitter?"
+        click_button "Save"
+        visit "/users/#{@u.username}/edit"
+        check "Always post updates to Twitter?"
+        click_button "Save"
+        visit "/users/#{@u.username}/edit"
+        assert has_checked_field? "Always post updates to Twitter?"
+      end
     end
   end
 
@@ -205,8 +295,22 @@ describe "Authorization" do
       it "has the twitter send checkbox" do
         log_in_as_some_user(:with => :twitter)
 
-        assert_match page.body, /Twitter/
-        assert find_field('tweet').checked?
+
+        assert has_checked_field? 'tweet'
+      end
+
+      it "has twitter send unchecked if your preference is to not always send to twitter" do
+        @u = Fabricate(:user)
+        a = Fabricate(:authorization, :user => @u)
+        log_in(@u, a.uid)
+        visit "/users/#{@u.username}/edit"
+        uncheck "Always post updates to Twitter?"
+        VCR.use_cassette('update_twitter_preferences') do
+          click_button "Save"
+        end
+        visit "/"
+
+        assert has_unchecked_field? 'tweet'
       end
 
       it "sends updates to twitter" do
@@ -231,7 +335,9 @@ describe "Authorization" do
       it "logs in with username and no twitter login" do
         log_in_as_some_user(:with => :username)
 
-        assert_match /Login successful/, page.body
+        within flash do
+          assert has_content?("Login successful")
+        end
         assert_match @u.username, page.body
       end
 

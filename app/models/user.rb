@@ -13,7 +13,7 @@ class User
 
   # Associations
   # XXX: These don't seem to be getting set when you sign up with Twitter, etc?
-  many :authorizations, :dependant => :destroy
+  many :authorizations, :dependent => :destroy
   belongs_to :author
   key :author_id, ObjectId
 
@@ -33,18 +33,35 @@ class User
   # Tokens are valid for 2 days, they're checked against this
   key :perishable_token_set, DateTime, :default => nil
 
+  # Global preference set via user's profile controlling the state of the Post to Twitter checkbox
+  key :always_send_to_twitter, Integer, :default => 1
+
   validate :email_already_confirmed
-  validates_uniqueness_of :username, :allow_nil => :true, :case_sensitive => false
+  validates_uniqueness_of :username,
+                          :allow_nil => :true,
+                          :case_sensitive => false,
+                          :message => "has already been taken."
 
   # The maximum is arbitrary
   # Twitter has 15, let's be different
-  validates_length_of :username, :maximum => 17, :message => "must be 17 characters or fewer."
+  validates_length_of :username,
+                      :maximum => 17,
+                      :message => "must be 17 characters or fewer."
 
   # Validate users don't have special characters in their username
   validate :no_malformed_username
 
   # This will establish other entities related to the User
   after_create :finalize
+
+  # Mongo_mapper does not run :dependent => :destroy on belongs_to
+  # relationships, so clean up manually.
+  # https://github.com/jnunemaker/mongomapper/blob/master/test/functional/associations/test_belongs_to_proxy.rb#L155
+  before_destroy :clean_up
+
+  def clean_up
+    self.author.destroy
+  end
 
   def feed
     self.author.feed
@@ -78,7 +95,7 @@ class User
 
   # Generate a multi-use token for account confirmation and password resets
   def set_perishable_token
-    self.perishable_token = Digest::MD5.hexdigest( rand.to_s )
+    self.perishable_token = SecureRandom.hex
     save
   end
 
@@ -138,24 +155,22 @@ class User
   end
 
   # Follow a particular feed
-  def follow!(f)
-    # can't follow yourself
-    if f == self.feed
-      return
-    end
+  def follow!(target_feed)
+    return false if target_feed == self.feed # can't follow yourself
 
-    following << f
-    save
+    self.following << target_feed
+    self.save
 
-    if f.local?
+    if target_feed.local?
       # Add the inverse relationship
-      followee = User.first(:author_id => f.author.id)
+      followee = User.first(:author_id => target_feed.author.id)
       followee.followed_by! self.feed
     else
       # Queue a notification job
-      self.delay.send_follow_notification(f.id)
+      self.delay.send_follow_notification(target_feed.id)
     end
-    f
+
+    target_feed
   end
 
   # Send Salmon notification so that the remote user
@@ -170,6 +185,9 @@ class User
     # Send envelope to Author's Salmon endpoint
     uri = URI.parse(f.author.salmon_url)
     http = Net::HTTP.new(uri.host, uri.port)
+    if uri.scheme == "https"
+      http.use_ssl = (uri.port == 443)
+    end
     res = http.post(uri.path, envelope, {"Content-Type" => "application/magic-envelope+xml"})
   end
 
@@ -198,6 +216,9 @@ class User
     # Send envelope to Author's Salmon endpoint
     uri = URI.parse(f.author.salmon_url)
     http = Net::HTTP.new(uri.host, uri.port)
+    if uri.scheme == "https"
+      http.use_ssl = (uri.port == 443)
+    end
     res = http.post(uri.path, envelope, {"Content-Type" => "application/magic-envelope+xml"})
   end
 
@@ -206,7 +227,8 @@ class User
     f = Feed.first :id => to_feed_id
     u = Update.first :id => update_id
 
-    base_uri = "http://#{author.domain}/"
+    protocol = author.use_ssl ? "https" : "http"
+    base_uri = "#{protocol}://#{author.domain}/"
     salmon = OStatus::Salmon.new(u.to_atom(base_uri))
 
     envelope = salmon.to_xml self.to_rsa_keypair
@@ -214,7 +236,24 @@ class User
     # Send envelope to Author's Salmon endpoint
     uri = URI.parse(f.author.salmon_url)
     http = Net::HTTP.new(uri.host, uri.port)
+    if uri.scheme == "https"
+      http.use_ssl = (uri.port == 443)
+    end
     res = http.post(uri.path, envelope, {"Content-Type" => "application/magic-envelope+xml"})
+  end
+
+  def autocomplete(query)
+    if query.nil? || query.blank?
+      return []
+    end
+
+    query = '^' + Regexp.escape(query) + '.*'
+    following.inject([]) do |result, obj|
+      if /#{query}/i =~ obj.author.fully_qualified_name
+        result << { :label => obj.author.fully_qualified_name.downcase }
+      end
+      result
+    end
   end
 
   def followed_by?(f)
@@ -234,7 +273,7 @@ class User
     existing_feeds = Feed.all(:remote_url => feed_url)
 
     # local feed?
-    if existing_feeds.empty? and feed_url.start_with?("http://#{author.domain}/")
+    if existing_feeds.empty? and feed_url.match(/^http[s]?:\/\/#{author.domain}\//)
       feed_id = feed_url[/\/feeds\/(.+)$/,1]
       existing_feeds = [Feed.first(:id => feed_id)]
     end
@@ -251,14 +290,14 @@ class User
   timestamps!
 
   # Retrieve the list of Updates in the user's timeline
-  def timeline(params = nil)
+  def timeline
     following_plus_me = following.map(&:author_id)
     following_plus_me << self.author.id
     Update.where(:author_id => following_plus_me).order(['created_at', 'descending'])
   end
 
   # Retrieve the list of Updates that are replies to this user
-  def at_replies(params)
+  def at_replies
     Update.where(:text => /^@#{Regexp.quote(username)}\b/).order(['created_at', 'descending'])
   end
 
@@ -293,43 +332,71 @@ class User
   def self.authenticate(username, pass)
     user = User.find_by_case_insensitive_username(username)
     return nil if user.nil?
+    return nil unless user.hashed_password
     return user if BCrypt::Password.new(user.hashed_password) == pass
     nil
   end
 
   # Edit profile information
-  def edit_user_profile(params)
-    unless params[:password].nil? or params[:password].empty?
+  def update_profile!(params)
+
+    params[:email] = nil if params[:email].blank?
+
+    self.username               = params[:username]
+
+    self.email_confirmed        = self.email == params[:email]
+    self.email                  = params[:email]
+
+    self.always_send_to_twitter = params[:user] && params[:user][:always_send_to_twitter].to_i
+
+    # I can't figure out how to use a real rails validator to confirm that
+    # password matches password_confirm, since these two attributes are
+    # virtual and we only want to check this in this particular case of
+    # updating a user.
+
+    # Additionally, running the other validations clears self.errors, so
+    # we need to add our own errors AFTER calling valid?. But we shouldn't
+    # save the record at all if the password change isn't valid.
+
+    self.valid?
+
+    unless params[:password].blank?
       if params[:password] == params[:password_confirm]
         self.password = params[:password]
         self.save
       else
-        return "Passwords must match"
+        self.errors.add(:password, "doesn't match confirmation.")
       end
     end
 
-    self.email_confirmed = self.email == params[:email]
-    self.email = params[:email]
+    # Calling valid? again here would make the validators run again, which
+    # would clear self.errors again. We may have added an error about the
+    # password not matching the confirmation.
+    if self.errors.present?
+      return false
+    else
+      self.save
 
-    self.save
+      author.username = params[:username]
+      author.name     = params[:name]
+      author.email    = params[:email]
+      author.website  = params[:website]
+      author.bio      = params[:bio]
+      author.save
 
-    author.name    = params[:name]
-    author.email   = params[:email]
-    author.website = params[:website]
-    author.bio     = params[:bio]
-    author.save
+      # TODO: Send out notice to other nodes
+      # To each remote domain that is following you via hub
+      # and to each remote domain that you follow via salmon
+      author.feed.ping_hubs
 
-    # TODO: Send out notice to other nodes
-    # To each remote domain that is following you via hub
-    # and to each remote domain that you follow via salmon
-    author.feed.ping_hubs
-
-    return true
+      return self
+    end
   end
 
   # A better name would be very welcome.
   def self.find_by_case_insensitive_username(username)
-    User.first(:username => /^#{Regexp.escape(username)}$/i)
+    username = Regexp.escape(username)
+    User.first(:username => /^#{username}$/i)
   end
 
   def token_expired?
@@ -359,9 +426,10 @@ class User
   end
 
   def email_already_confirmed
+    return if self.email.blank?
     if User.where(:email => self.email,
-      :email_confirmed => true,
-      :username.ne => self.username).count > 0
+                  :email_confirmed => true,
+                  :id.ne => self.id).count > 0
       errors.add(:email, "is already taken.")
     end
   end

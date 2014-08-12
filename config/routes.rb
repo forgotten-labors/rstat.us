@@ -5,30 +5,38 @@ RstatUs::Application.routes.draw do
   # Sessions
   resources :sessions, :only => [:new, :create, :destroy]
   match "/login", :to => "sessions#new"
-  match "/logout", :to => "sessions#destroy"
-
-  match "/follow", :to => "static#follow", :via => :get
+  match "/logout", :to => "sessions#destroy", :via => :post
 
   # Static
-  match "contact" => "static#contact"
-  match "open_source" => "static#open_source"
-  match "help" => "static#help"
-  # static for remote follows
-  match "/follow", :to => "static#follow"
+  match "about",       :to => "static#about"
+  match "contact",     :to => "static#contact"
+  match "follow",      :to => "static#follow", :via => :get
+  match "help",        :to => "static#help"
+  match "open_source", :to => "static#open_source"
 
   # External Auth
-  match '/auth/:provider/callback', :to => 'auth#auth'
+  # If we add more valid auth providers, they will need to be added
+  # to this route's constraints
+  match '/auth/:provider/callback', :to => 'auth#auth', :constraints => {:provider => /twitter/}
+  match '/auth/:provider/callback', :to => 'auth#invalid_auth_provider'
   match '/auth/failure', :to => 'auth#failure'
   match '/users/:username/auth/:provider', :via => :delete, :to => "auth#destroy", :constraints => {:username => /[^\/]+/ }
 
   # Users
+  match 'users/:id.:format', :to => "users#show", :constraints => { :id => /[^\/]+/, :format => /json/ }
   resources :users, :constraints => { :id => /[^\/]+/ }
+  match 'users/:id/confirm_delete', :to => "users#confirm_delete", :constraints => { :id => /[^\/]+/ }, :as => "account_deletion_confirmation", :via => :get
   match "users/:id/feed", :to => "users#feed", :as => "user_feed", :constraints => { :id => /[^\/]+/ }
-
-  # other new route?
   match 'users/:id/followers', :to => "users#followers", :constraints => { :id => /[^\/]+/ }, :as => "followers"
   match 'users/:id/following', :to => "users#following", :constraints => { :id => /[^\/]+/ }, :as => "following"
+
+  # Users - manage avatar
+  match '/users/:username/avatar', :via => :delete, :to => "avatar#destroy", :constraints => {:username => /[^\/]+/ }, :as => "avatar"
+
+  # Users - confirm email
   match 'confirm_email/:token', :to => "users#confirm_email"
+
+  # Users - forgot/reset password
   match 'forgot_password', :to => "users#forgot_password_new", :via => :get, :as => "forgot_password"
   match 'forgot_password', :to => "users#forgot_password_create", :via => :post
   match 'forgot_password_confirm', :to => "users#forgot_password_confirm", :via => :get, :as => "forgot_password_confirm"
@@ -40,9 +48,13 @@ RstatUs::Application.routes.draw do
   resources :updates, :only => [:index, :show, :create, :destroy]
   match "/timeline", :to => "updates#timeline"
   match "/replies", :to => "updates#replies"
+  match "/export", :to => "updates#export", :via => :get
 
   # Search
   resource :search, :only => :show
+
+  # Autocomplete
+  get "/autocomplete" => "users#autocomplete", :format => "json"
 
   # feeds
   resources :feeds, :only => :show

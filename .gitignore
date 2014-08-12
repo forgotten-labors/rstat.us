@@ -6,9 +6,12 @@ docs/*
 config.yml
 .sass-cache
 tmp
-public/assets/src
-test/data
+tags
+.rvmrc
+public/assets
 test/coverage
 log/*.log*
 capybara*
 .DS_Store
+.bundle
+vendor/bundle
